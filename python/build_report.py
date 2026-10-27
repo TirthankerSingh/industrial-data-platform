@@ -196,18 +196,22 @@ def build() -> Path:
     return out
 
 
-def to_pdf(html_path: Path) -> None:
+def to_pdf_file(html_path: Path, out_pdf: Path) -> None:
     exe = next((b for b in BROWSERS if Path(b).exists()), shutil.which("msedge") or shutil.which("chrome"))
     if not exe:
         sys.exit("No Edge/Chrome found to print the PDF")
     subprocess.run([exe, "--headless=new", "--disable-gpu", "--no-pdf-header-footer", "--run-all-compositor-stages-before-draw",
-                    "--virtual-time-budget=20000", f"--print-to-pdf={OUT_PDF}", html_path.as_uri()],
+                    "--virtual-time-budget=20000", f"--print-to-pdf={out_pdf}", html_path.as_uri()],
                    check=True, capture_output=True, timeout=180)
     try:
         from pypdf import PdfReader
-        print(f"PDF: {OUT_PDF}  pages={len(PdfReader(OUT_PDF).pages)}  size={OUT_PDF.stat().st_size / 1e6:.1f} MB")
+        print(f"PDF: {out_pdf}  pages={len(PdfReader(out_pdf).pages)}  size={out_pdf.stat().st_size / 1e6:.1f} MB")
     except Exception:
-        print(f"PDF: {OUT_PDF}")
+        print(f"PDF: {out_pdf}")
+
+
+def to_pdf(html_path: Path) -> None:
+    to_pdf_file(html_path, OUT_PDF)
 
 
 if __name__ == "__main__":
