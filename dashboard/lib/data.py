@@ -3,9 +3,12 @@
 Backend selection (automatic):
   * PostgreSQL when credentials are found (st.secrets["postgres"] or dashboard/.streamlit/secrets.toml)
     and the server answers - the local mode.
+  * Else Google BigQuery when st.secrets has [bigquery] (+ [gcp_service_account] on the hosted app)
+    and the dataset answers - the cloud-warehouse mode.
   * Otherwise the bundled Parquet snapshot in data/processed/ - the hosted mode (Streamlit
     Community Cloud), which cannot break on demo day.
-Both backends return identical DataFrames, so every page runs the same analysis code.
+All backends return identical DataFrames, so every page runs the same analysis code.
+IDP_BACKEND=parquet|bigquery|postgres forces one (IDP_FORCE_PARQUET=1 still works).
 """
 from __future__ import annotations
 
@@ -42,18 +45,69 @@ def _pg_params() -> dict | None:
     return None
 
 
+def _bq_params() -> dict | None:
+    try:
+        return dict(st.secrets["bigquery"])            # {"project": ..., "dataset": ...}
+    except Exception:
+        if os.environ.get("IDP_BACKEND") == "bigquery":  # local test with `gcloud auth application-default login`
+            return {"project": os.environ.get("IDP_BQ_PROJECT", "project-cc51f331-7539-4662-a83"), "dataset": "idp"}
+    return None
+
+
 @st.cache_resource(show_spinner=False)
-def backend() -> str:
+def _bq_client():
+    from google.cloud import bigquery
+    p = _bq_params()
+    try:
+        from google.oauth2 import service_account
+        creds = service_account.Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]))
+    except Exception:
+        creds = None                                   # falls back to application-default credentials
+    return bigquery.Client(project=p["project"], credentials=creds)
+
+
+def _bq_frame(sql: str) -> pd.DataFrame:
+    return _bq_client().query(sql).to_dataframe()
+
+
+def _bq_table(name: str) -> str:
+    p = _bq_params()
+    return f"`{p['project']}.{p['dataset']}.{name}`"
+
+
+def _pg_ok() -> bool:
     p = _pg_params()
-    if not p or os.environ.get("IDP_FORCE_PARQUET") == "1":   # IDP_FORCE_PARQUET=1 simulates the hosted app
-        return "parquet"
+    if not p:
+        return False
     try:
         import psycopg
         with psycopg.connect(connect_timeout=3, **p) as c:
             c.execute("SELECT 1 FROM core.machine_data LIMIT 1")
-        return "postgres"
+        return True
     except Exception:
+        return False
+
+
+def _bq_ok() -> bool:
+    if not _bq_params():
+        return False
+    try:
+        _bq_frame(f"SELECT 1 FROM {_bq_table('machine_data')} LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def backend() -> str:
+    forced = "parquet" if os.environ.get("IDP_FORCE_PARQUET") == "1" else os.environ.get("IDP_BACKEND")
+    if forced == "parquet":                            # simulates the hosted app without a warehouse
         return "parquet"
+    if forced in (None, "postgres") and _pg_ok():
+        return "postgres"
+    if forced in (None, "bigquery") and _bq_ok():
+        return "bigquery"
+    return "parquet"
 
 
 def _pg_frame(sql: str) -> pd.DataFrame:
@@ -77,6 +131,17 @@ def machine_data() -> pd.DataFrame:
         df = _pg_frame(f"SELECT {cols} FROM core.machine_data")
         df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata")
         df["alarm"] = df["alarm"].map({"t": True, "f": False, True: True, False: False})
+    elif backend() == "bigquery":
+        df = _bq_frame(f"SELECT {', '.join(f'`{c}`' for c in FACT_COLS)} FROM {_bq_table('machine_data')}")  # `current` is reserved
+        df["ts"] = pd.to_datetime(df["ts"], utc=True).dt.tz_convert("Asia/Kolkata")
+        df["alarm"] = df["alarm"].astype(bool)
+        for c in df.columns:                           # BigQuery returns 64-bit/nullable types; match the Parquet frame
+            if str(df[c].dtype) in ("float64", "Float64"):
+                df[c] = df[c].astype("float32")
+            elif str(df[c].dtype) in ("int64", "Int64") and c != "ts":
+                df[c] = df[c].astype("int16" if c == "alarm_count" else "int32")
+            elif str(df[c].dtype) == "string":
+                df[c] = df[c].astype(object)
     else:
         df = pd.read_parquet(PROCESSED / "machine_data.parquet", columns=FACT_COLS)
     df["machine_status"] = pd.Categorical(df["machine_status"], categories=STATUS_ORDER)
@@ -91,6 +156,10 @@ def master() -> dict[str, pd.DataFrame]:
         m = {"machine": _pg_frame("SELECT * FROM core.machine"), "plant": _pg_frame("SELECT * FROM core.plant"),
              "part": _pg_frame("SELECT * FROM core.part_family"), "alarm": _pg_frame("SELECT * FROM core.alarm_master"),
              "type": _pg_frame("SELECT * FROM core.machine_type")}
+    elif backend() == "bigquery":
+        m = {k: _bq_frame(f"SELECT * FROM {_bq_table(t)}") for k, t in
+             {"machine": "machine_master", "plant": "plant", "part": "part_master", "alarm": "alarm_master",
+              "type": "machine_type"}.items()}
     else:
         m = {"machine": pd.read_csv(REFERENCE / "machine_master.csv"), "plant": pd.read_csv(REFERENCE / "plant.csv"),
              "part": pd.read_csv(REFERENCE / "part_master.csv"), "alarm": pd.read_csv(REFERENCE / "alarm_master.csv"),

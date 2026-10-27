@@ -52,7 +52,9 @@ with st.sidebar:
     }
     st.divider()
     mode = data.backend()
-    st.markdown(f"**Data source:** {'PostgreSQL (local)' if mode == 'postgres' else 'Parquet snapshot (hosted)'}")
+    label = {"postgres": "PostgreSQL (local)", "bigquery": "Google BigQuery (asia-south1)",
+             "parquet": "Parquet snapshot (hosted)"}[mode]
+    st.markdown(f"**Data source:** {label}")
     st.caption("Scenario: Automotive Tier-1 supplier, 3 plants, 100 CNC machines, 2025 calendar. "
                "Data: Bosch & UMich (REAL), Azure PdM & AI4I (BENCHMARK); fleet columns DERIVED.")
 
