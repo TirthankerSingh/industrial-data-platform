@@ -16,6 +16,10 @@ foreach ($role in "roles/bigquery.dataViewer", "roles/bigquery.jobUser", "roles/
 }
 $key = Join-Path $OutDir "idp-dashboard-key.json"
 gcloud iam service-accounts keys create $key --iam-account $sa
+if ($LASTEXITCODE -ne 0) {   # e.g. org policy iam.disableServiceAccountKeyCreation is enforced
+    Remove-Item $key -ErrorAction SilentlyContinue
+    throw "Key creation failed - nothing written. See the error above."
+}
 
 # Convert the JSON key into the TOML block Streamlit expects
 $j = Get-Content $key -Raw | ConvertFrom-Json
